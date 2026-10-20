@@ -9,16 +9,13 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
-from googletrans import Translator
+from deep_translator import GoogleTranslator
 
 # Enable logging
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
 )
 logger = logging.getLogger(__name__)
-
-# Initialize Google Translator
-translator = Translator()
 
 # User language storage (in-memory)
 user_languages = {}
@@ -113,12 +110,13 @@ async def translate_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     user_text = update.message.text
 
     try:
-        translated = translator.translate(user_text, dest=target_lang)
+        # Use deep-translator to translate text automatically
+        translated_text = GoogleTranslator(source='auto', target=target_lang).translate(user_text)
         
         response_text = (
             f"<b>SB24 Translation 📩🌟</b>\n\n"
-            f"<b>Original ({translated.src}):</b> {user_text}\n"
-            f"<b>Translated ({target_lang}):</b> {translated.text}"
+            f"<b>Original:</b> {user_text}\n"
+            f"<b>Translated ({target_lang}):</b> {translated_text}"
         )
         await update.message.reply_html(response_text)
     except Exception as e:
