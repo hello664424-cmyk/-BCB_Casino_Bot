@@ -1,144 +1,225 @@
 import os
+import random
 import logging
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
-    Application,
+    ApplicationBuilder,
     CommandHandler,
     CallbackQueryHandler,
-    MessageHandler,
     ContextTypes,
-    filters,
 )
-from deep_translator import GoogleTranslator
 
-# Enable logging
+# Logging configuration
 logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
-)
-logger = logging.getLogger(__name__)
-
-# User language storage (in-memory)
-user_languages = {}
-
-# Branding text for SB24
-WELCOME_TEXT = (
-    "សូមស្វាគមន៍មកកាន់វេបសាយ SB24 📩🌟\n"
-    "ដែលជាវេបសាយធំបំផុតនៅក្នុងស្រុក និង📲មានទំនុកចិត្តបំផុត🎁\n\n"
-    "Please select your default target translation language:"
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO
 )
 
-def get_language_keyboard():
+# Environment variables
+TOKEN = os.getenv("BOT_TOKEN")
+REQUIRED_CHANNEL = os.getenv("REQUIRED_CHANNEL", "@YourChannelUsername")  # Must start with @
+
+# In-memory storage for user data (Replace with database like SQLite/PostgreSQL for production)
+user_balances = {}
+user_claims = {}
+
+def get_balance(user_id: int) -> int:
+    return user_balances.get(user_id, 100)  # Starting balance 100 credits
+
+def set_balance(user_id: int, amount: int):
+    user_balances[user_id] = amount
+
+async def check_subscription(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Verifies if the user is subscribed to the boost target channel."""
+    if not REQUIRED_CHANNEL or REQUIRED_CHANNEL == "@YourChannelUsername":
+        return True
+    try:
+        member = await context.bot.get_chat_member(chat_id=REQUIRED_CHANNEL, user_id=user_id)
+        if member.status in ["creator", "administrator", "member"]:
+            return True
+        return False
+    except Exception as e:
+        logging.error(f"Channel membership check failed: {e}")
+        return False
+
+def get_main_menu_keyboard():
     keyboard = [
         [
-            InlineKeyboardButton("🇰🇭 ភាសាខ្មែរ (Khmer)", callback_data="lang_km"),
-            InlineKeyboardButton("🇬🇧 English", callback_data="lang_en"),
+            InlineKeyboardButton("🎰 Slots", callback_data="game_slots"),
+            InlineKeyboardButton("🎲 Dice", callback_data="game_dice"),
         ],
         [
-            InlineKeyboardButton("🇨🇳 中文 (Chinese)", callback_data="lang_zh-cn"),
-            InlineKeyboardButton("🇹🇭 ไทย (Thai)", callback_data="lang_th"),
+            InlineKeyboardButton("🎯 Roulette", callback_data="game_roulette"),
+            InlineKeyboardButton("🎁 Daily Bonus", callback_data="claim_bonus"),
         ],
         [
-            InlineKeyboardButton("🇻🇳 Tiếng Việt", callback_data="lang_vi"),
+            InlineKeyboardButton("💰 My Balance", callback_data="check_balance"),
+            InlineKeyboardButton("🚀 Boost Channel", url=f"https://t.me/{REQUIRED_CHANNEL.replace('@', '')}"),
         ]
     ]
     return InlineKeyboardMarkup(keyboard)
 
-async def post_init(application: Application) -> None:
-    """Set bot command menu on startup."""
-    commands = [
-        BotCommand("start", "Start the bot & choose language"),
-        BotCommand("language", "Change target translation language"),
-        BotCommand("help", "How to use this bot"),
-    ]
-    await application.bot.set_my_commands(commands)
-    logger.info("Bot commands menu set successfully!")
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    
+    # Check Channel Subscription (Boost system)
+    is_subscribed = await check_subscription(user_id, context)
+    
+    if not is_subscribed:
+        keyboard = [
+            [InlineKeyboardButton("📢 Join Channel to Play", url=f"https://t.me/{REQUIRED_CHANNEL.replace('@', '')}")],
+            [InlineKeyboardButton("✅ Verify Joining", callback_data="verify_subscription")]
+        ]
+        await update.message.reply_text(
+            f"⚠️ **Access Restricted!**\n\nTo play games and earn rewards, please subscribe to our official channel first: {REQUIRED_CHANNEL}",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown"
+        )
+        return
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Send welcome message and language selector keyboard on /start."""
-    chat_id = update.effective_chat.id
-    if chat_id not in user_languages:
-        user_languages[chat_id] = "km"  # Default language: Khmer
-
+    balance = get_balance(user_id)
     await update.message.reply_text(
-        text=WELCOME_TEXT,
-        reply_markup=get_language_keyboard()
+        f"🎉 **Welcome to Telegram Casino & Boost Bot!**\n\nYour Current Balance: `{balance}` Credits\nChoose a game or option below to get started!",
+        reply_markup=get_main_menu_keyboard(),
+        parse_mode="Markdown"
     )
 
-async def set_language_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Trigger language selection via command /language."""
-    await update.message.reply_text(
-        text="🌐 Choose your preferred language for translation:",
-        reply_markup=get_language_keyboard()
-    )
-
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Send help message on /help."""
-    help_text = (
-        "<b>SB24 Translation Help 📩🌟</b>\n\n"
-        "1. Use /language to choose your target language.\n"
-        "2. Simply send any text message to the bot.\n"
-        "3. The bot will automatically translate it for you!"
-    )
-    await update.message.reply_html(help_text)
-
-async def language_button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle language selection from inline keyboard."""
+async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+    user_id = query.from_user.id
 
-    lang_code = query.data.replace("lang_", "")
-    user_languages[query.message.chat_id] = lang_code
-
-    lang_names = {
-        "km": "🇰🇭 ភាសាខ្មែរ (Khmer)",
-        "en": "🇬🇧 English",
-        "zh-cn": "🇨🇳 中文 (Chinese)",
-        "th": "🇹🇭 ไทย (Thai)",
-        "vi": "🇻🇳 Tiếng Việt"
-    }
-
-    selected_lang = lang_names.get(lang_code, lang_code)
-    await query.edit_message_text(
-        text=f"{WELCOME_TEXT}\n\n✅ **Selected Language:** {selected_lang}\n\n"
-             f"Send any text message now, and I will translate it for you!"
-    )
-
-async def translate_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Translate user input to the selected language."""
-    chat_id = update.effective_chat.id
-    target_lang = user_languages.get(chat_id, "km")
-    user_text = update.message.text
-
-    try:
-        # Use deep-translator to translate text automatically
-        translated_text = GoogleTranslator(source='auto', target=target_lang).translate(user_text)
-        
-        response_text = (
-            f"<b>SB24 Translation 📩🌟</b>\n\n"
-            f"<b>Original:</b> {user_text}\n"
-            f"<b>Translated ({target_lang}):</b> {translated_text}"
+    # Mandatory Channel Boost Guard
+    if not await check_subscription(user_id, context):
+        keyboard = [
+            [InlineKeyboardButton("📢 Join Channel to Play", url=f"https://t.me/{REQUIRED_CHANNEL.replace('@', '')}")],
+            [InlineKeyboardButton("✅ Verify Joining", callback_data="verify_subscription")]
+        ]
+        await query.edit_message_text(
+            f"❌ You must join {REQUIRED_CHANNEL} before playing!",
+            reply_markup=InlineKeyboardMarkup(keyboard)
         )
-        await update.message.reply_html(response_text)
-    except Exception as e:
-        logger.error(f"Translation Error: {e}")
-        await update.message.reply_text("❌ Failed to translate text. Please try again.")
+        return
 
-def main() -> None:
-    token = os.environ.get("BOT_TOKEN")
-    if not token:
+    data = query.data
+    balance = get_balance(user_id)
+
+    if data == "verify_subscription":
+        await query.edit_message_text(
+            f"✅ **Verification successful!** Welcome!\n\nBalance: `{balance}` Credits",
+            reply_markup=get_main_menu_keyboard(),
+            parse_mode="Markdown"
+        )
+
+    elif data == "check_balance":
+        await query.edit_message_text(
+            f"💳 **Account Details**\n\nUser ID: `{user_id}`\nAvailable Balance: `{balance}` Credits",
+            reply_markup=get_main_menu_keyboard(),
+            parse_mode="Markdown"
+        )
+
+    elif data == "claim_bonus":
+        bonus = 50
+        set_balance(user_id, balance + bonus)
+        await query.edit_message_text(
+            f"🎁 **Daily Reward Claimed!**\n\nYou received +`{bonus}` Credits.\nNew Balance: `{balance + bonus}` Credits",
+            reply_markup=get_main_menu_keyboard(),
+            parse_mode="Markdown"
+        )
+
+    # GAME: SLOTS
+    elif data == "game_slots":
+        bet = 10
+        if balance < bet:
+            await query.edit_message_text("❌ Insufficient balance! (Requires 10 Credits)", reply_markup=get_main_menu_keyboard())
+            return
+        
+        symbols = ["🍒", "🍋", "🔔", "7️⃣"]
+        reel = [random.choice(symbols) for _ in range(3)]
+        
+        if reel[0] == reel[1] == reel[2]:
+            win = 100
+            set_balance(user_id, balance - bet + win)
+            res = f"🎰 **JACKPOT!** [{' '.join(reel)}]\nYou won `{win}` Credits!"
+        elif reel[0] == reel[1] or reel[1] == reel[2] or reel[0] == reel[2]:
+            win = 25
+            set_balance(user_id, balance - bet + win)
+            res = f"🎰 **MATCH 2!** [{' '.join(reel)}]\nYou won `{win}` Credits!"
+        else:
+            set_balance(user_id, balance - bet)
+            res = f"🎰 **NO MATCH!** [{' '.join(reel)}]\nYou lost `{bet}` Credits."
+
+        await query.edit_message_text(
+            f"{res}\n\nNew Balance: `{get_balance(user_id)}` Credits",
+            reply_markup=get_main_menu_keyboard(),
+            parse_mode="Markdown"
+        )
+
+    # GAME: DICE
+    elif data == "game_dice":
+        bet = 10
+        if balance < bet:
+            await query.edit_message_text("❌ Insufficient balance! (Requires 10 Credits)", reply_markup=get_main_menu_keyboard())
+            return
+
+        user_roll = random.randint(1, 6)
+        bot_roll = random.randint(1, 6)
+
+        if user_roll > bot_roll:
+            win = 20
+            set_balance(user_id, balance - bet + win)
+            msg = f"🎲 You rolled `{user_roll}` vs Bot `{bot_roll}`.\n**YOU WON `{win}` Credits!**"
+        elif user_roll < bot_roll:
+            set_balance(user_id, balance - bet)
+            msg = f"🎲 You rolled `{user_roll}` vs Bot `{bot_roll}`.\n**YOU LOST `{bet}` Credits.**"
+        else:
+            msg = f"🎲 Both rolled `{user_roll}`.\n**DRAW!** Bet returned."
+
+        await query.edit_message_text(
+            f"{msg}\n\nNew Balance: `{get_balance(user_id)}` Credits",
+            reply_markup=get_main_menu_keyboard(),
+            parse_mode="Markdown"
+        )
+
+    # GAME: ROULETTE
+    elif data == "game_roulette":
+        bet = 15
+        if balance < bet:
+            await query.edit_message_text("❌ Insufficient balance! (Requires 15 Credits)", reply_markup=get_main_menu_keyboard())
+            return
+
+        outcomes = ["Red 🔴", "Black 🔴", "Green 🟢 (Jackpot)"]
+        weights = [0.45, 0.45, 0.10]
+        result = random.choices(outcomes, weights=weights)[0]
+
+        if "Green" in result:
+            win = 150
+            set_balance(user_id, balance - bet + win)
+            res = f"🎯 Result: **{result}**\n🔥 **SUPER WIN!** +`{win}` Credits!"
+        elif "Red" in result:
+            win = 30
+            set_balance(user_id, balance - bet + win)
+            res = f"🎯 Result: **{result}**\n✨ **WIN!** +`{win}` Credits!"
+        else:
+            set_balance(user_id, balance - bet)
+            res = f"🎯 Result: **{result}**\n💀 **LOST!** -`{bet}` Credits."
+
+        await query.edit_message_text(
+            f"{res}\n\nNew Balance: `{get_balance(user_id)}` Credits",
+            reply_markup=get_main_menu_keyboard(),
+            parse_mode="Markdown"
+        )
+
+def main():
+    if not TOKEN:
         raise ValueError("BOT_TOKEN environment variable is missing!")
+        
+    app = ApplicationBuilder().token(TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CallbackQueryHandler(handle_callback))
 
-    application = Application.builder().token(token).post_init(post_init).build()
-
-    # Handlers
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("language", set_language_command))
-    application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CallbackQueryHandler(language_button_callback, pattern="^lang_"))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, translate_text))
-
-    logger.info("Bot starting...")
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    print("Bot is running...")
+    app.run_polling()
 
 if __name__ == "__main__":
     main()
